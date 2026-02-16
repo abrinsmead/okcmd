@@ -11,25 +11,46 @@ program
 
 program
   .command('build')
-  .description('Generate a Deno app from a spec and build a Docker image')
+  .description('Generate an app from a spec and build a Docker image')
   .argument('<filename>', 'path to specification file')
-  .option('-p, --port <number>', 'port for validation', '3000')
   .action(build);
 
 program
   .command('run')
   .description('Run a previously built app in Docker')
+  .argument('<filename>', 'path to specification file')
   .option('-p, --port <number>', 'port to expose on host', '3000')
+  .option('-e, --env <vars...>', 'environment variables to pass to the container (KEY=VALUE)')
+  .option('--env-file <path>', 'path to env file to pass to the container')
   .action(run);
 
 program
   .command('serve')
-  .description('Generate, build, and run a Deno app from a spec file')
+  .description('Generate, build, and run an app from a spec file')
   .argument('<filename>', 'path to specification file')
   .option('-p, --port <number>', 'port to run the app on', '3000')
+  .option('-e, --env <vars...>', 'environment variables to pass to the container (KEY=VALUE)')
+  .option('--env-file <path>', 'path to env file to pass to the container')
   .action(async (filename, opts) => {
     await build(filename, opts);
-    await run(opts);
+    await run(filename, opts);
+  });
+
+program
+  .command('stop')
+  .description('Stop a running app')
+  .argument('<filename>', 'path to specification file')
+  .action((filename) => {
+    const { spawnSync } = require('child_process');
+    const { deriveSpecName } = require('./build');
+    const chalk = require('chalk');
+    const containerName = `ok-${deriveSpecName(filename)}`.replace(/[^a-zA-Z0-9_.-]/g, '-');
+    const result = spawnSync('docker', ['stop', '-t', '2', containerName], { stdio: 'ignore' });
+    if (result.status === 0) {
+      console.log(chalk.dim(`Stopped ${containerName}`));
+    } else {
+      console.log(chalk.dim(`${containerName} is not running`));
+    }
   });
 
 program
@@ -40,24 +61,9 @@ program
     const { spawnSync } = require('child_process');
     const okBase = path.resolve('.ok');
 
-    // Read name before deleting
-    const nameFile = path.join(okBase, 'name');
-    let name = null;
-    if (fs.existsSync(nameFile)) {
-      name = fs.readFileSync(nameFile, 'utf-8').trim();
-    }
-
     if (fs.existsSync(okBase)) {
       fs.rmSync(okBase, { recursive: true });
       console.log('Cleaned .ok/');
-    }
-
-    if (name) {
-      const imageTag = `ok-${name}:latest`;
-      const result = spawnSync('docker', ['rmi', imageTag], { stdio: 'ignore' });
-      if (result.status === 0) {
-        console.log(`Removed image ${imageTag}`);
-      }
     }
   });
 

@@ -4,54 +4,64 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-`ok` is a CLI that turns a markdown specification into a running, containerized web app. It uses the Claude Agent SDK to generate a single-file Deno/TypeScript application, builds a Docker image, and runs it.
+`ok` is a CLI that turns a markdown specification into a running, containerized web app. All agentic code generation happens inside a Docker build — the CLI is a thin wrapper around `docker build`.
 
 ## Commands
 
 ```bash
 npm install && npm link   # Install deps and register the `ok` global command
-ok build <spec.md>        # Generate app from spec + build Docker image
-ok run                    # Run a previously built image
-ok serve <spec.md>        # build + run in one step
-ok clean                  # Remove .ok/ dir and Docker image
+ok build <spec.md>        # Build Docker image (generation happens inside Docker)
+ok run <spec.md>          # Run a previously built image
+ok serve <spec.md>        # Build + run in one step
+ok stop <spec.md>         # Stop a running container
+ok clean                  # Remove .ok/ build artifacts
 ```
 
-Requires `ANTHROPIC_API_KEY` in `.env` (loaded via dotenv).
+Run/serve options:
+
+```bash
+ok run <spec.md> -p 8080                        # Custom port
+ok serve <spec.md> -e DATABASE_URL=postgres://…  # Pass env vars to the app
+ok serve <spec.md> --env-file .env.app           # Pass env file to the app
+```
+
+Requires `ANTHROPIC_API_KEY` in `.env` (loaded via dotenv). The key is passed as a Docker secret mount and only exists in the builder stage — it's discarded in the final image.
 
 ## Architecture
 
-**Runtime split:** The CLI itself runs on Node.js (CommonJS). The generated apps run on Deno (TypeScript).
+**Runtime split:** The CLI runs on Node.js (CommonJS). Code generation runs inside Docker via `src/builder.mjs` (Node.js ESM). Generated apps run on `node:lts-alpine` and can use any language/framework available in that image.
 
 **Source modules:**
 
 - `bin/ok.js` — Shebang entry point, just requires `src/cli.js`
 - `src/cli.js` — Commander command definitions, dotenv setup
-- `src/agent.js` — Wrapper around `@anthropic-ai/claude-agent-sdk`'s `query()` with streaming output formatting
-- `src/assertions.js` — Exports `extractAssertions(spec)`: uses a text-only agent call with structured output to extract testable behavioral assertions from a spec. Returns `string[]`, gracefully degrades to empty array on failure
-- `src/build.js` — Core generation logic: extracts assertions from spec, sends spec + assertions to Claude Agent, writes `.ok/app.ts` + `.ok/test.ts`, generates Dockerfile, runs `docker build`. Has smart diffing — if spec hasn't changed, skips regeneration; if spec changed, re-extracts assertions and sends a diff-based update prompt
-- `src/run.js` — Reads image name from `.ok/name`, runs `docker run` with port mapping and signal forwarding
+- `src/build.js` — Thin orchestrator: validates inputs, checks for existing image (extracts spec to compare), stages `.ok/` build context, runs `docker build` with secret mount for API key
+- `src/builder.mjs` — Node.js ESM script that runs inside Docker during build. Calls `claude -p` (headless mode), reads `/app/spec.md`, generates the app under `/app/`
+- `src/run.js` — Derives image tag from spec filename, runs `docker run` with port mapping, env vars, and signal forwarding
 
-**Build output (`.ok/` directory):**
+**Build flow:**
 
-- `spec.md` — Saved copy of input spec (used for change detection)
-- `app.ts` — Generated Deno application
-- `test.ts` — Generated Deno test file that verifies behavioral assertions (created when assertions are extracted)
-- `assertions.json` — Extracted behavioral assertions from the spec (array of strings)
-- `name` — Spec name (used for Docker image tag: `ok-{name}:latest`)
-- `Dockerfile` — Generated, always uses `denoland/deno:latest`
+1. CLI validates inputs, derives image tag (`ok-{specName}:latest`)
+2. Checks for existing image — extracts spec via `docker create`/`docker cp`, compares to current spec
+3. If unchanged: skip. If changed or new: stage `.ok/` with spec.md, builder.mjs, Dockerfile
+4. `docker build` runs a multi-stage build:
+   - Stage 1 (builder): `node:lts-alpine` + Claude Code, runs `builder.mjs` which calls `claude -p` to generate the app
+   - Stage 2 (runtime): Clean `node:lts-alpine` image with the generated app files
+5. Cleans up `.ok/`
 
-**Key generation constraints** (in `build.js` `requirements` string):
+**Key generation constraints** (in `builder.mjs` `requirements` string):
 
-- Port from `PORT` env var
-- `npm:` prefix for npm imports in Deno
-- `jsr:@db/sqlite` for persistence (not `npm:better-sqlite3`)
-- No backticks in embedded frontend JS (breaks outer template literal)
-- Single-file architecture — frontend is embedded HTML/JS in the TypeScript server
+- Entrypoint must be `/app/start.sh`
+- Single HTTP server on port from `PORT` env var
+- Runtime is `node:lts-alpine` — Node.js available, other runtimes via apk/npm
+- Simple MVP architecture — Vite for frontend, Express for backend
+- No heavy frameworks (Next.js, Remix, etc.)
 
 ## Conventions
 
-- All source is CommonJS (`require`/`module.exports`), module type set in package.json
-- The agent SDK is the one async import (`await import(...)`) because it's ESM-only
-- `.ok/` is gitignored — it's a build artifact directory
+- All CLI source is CommonJS (`require`/`module.exports`), module type set in package.json
+- `builder.mjs` is Node.js ESM — it only runs inside Docker
+- `.ok/` is gitignored — it's a temporary staging directory cleaned up after build
 - Docker image naming: `ok-{specname}:latest`
+- Example specs live in `examples/`
 - No test suite exists currently

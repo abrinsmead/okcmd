@@ -1,0 +1,21 @@
+{
+  "name": "ok",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "bin/ok.js",
+  "bin": {
+    "ok": "./bin/ok.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.39",
+    "commander": "^14.0.3",
+    "diff": "^8.0.3",
+    "dotenv": "^17.2.4"
+  }
+}

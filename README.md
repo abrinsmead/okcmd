@@ -10,8 +10,6 @@ Software engineering is moving up an abstraction layer — from code to prose. T
 
 `ok` is a CLI that turns a markdown specification into a containerized web app. Describe what you want in plain English*, and `ok` handles the rest: code generation runs inside Docker via [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview), producing a clean image with nothing but your app.
 
-No scaffolding. No boilerplate. Just a spec and a container.
-
 <sub>*Or any written language you prefer.</sub>
 
 ## Quick start

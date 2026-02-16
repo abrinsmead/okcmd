@@ -1,13 +1,30 @@
 {
-  "name": "ok",
+  "name": "okcmd",
   "version": "1.0.0",
-  "description": "",
+  "description": "Turn a markdown spec into a running, containerized web app",
   "license": "ISC",
-  "author": "",
+  "author": "Alex",
   "type": "commonjs",
   "main": "bin/ok.js",
   "bin": {
     "ok": "./bin/ok.js"
+  },
+  "files": [
+    "bin/",
+    "src/"
+  ],
+  "keywords": [
+    "cli",
+    "docker",
+    "code-generation",
+    "ai",
+    "claude",
+    "markdown",
+    "web-app"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/abrinsmead/okcmd"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"

@@ -54,7 +54,6 @@ ok build <spec.md>     # Generate app and build Docker image
 ok run <spec.md>       # Run a previously built image
 ok serve <spec.md>     # Build + run in one step
 ok stop <spec.md>      # Stop a running container
-ok clean               # Remove .ok/ build artifacts
 ```
 
 Options:

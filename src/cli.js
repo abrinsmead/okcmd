@@ -53,18 +53,4 @@ program
     }
   });
 
-program
-  .command('clean')
-  .description('Remove build artifacts and Docker images')
-  .action(() => {
-    const fs = require('fs');
-    const { spawnSync } = require('child_process');
-    const okBase = path.resolve('.ok');
-
-    if (fs.existsSync(okBase)) {
-      fs.rmSync(okBase, { recursive: true });
-      console.log('Cleaned .ok/');
-    }
-  });
-
 program.parse();

@@ -1,9 +1,8 @@
 const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
+require('dotenv').config({ path: path.resolve(__dirname, '..', '.env'), debug: false, quiet: true });
 const { program } = require('commander');
 const { build } = require('./build');
 const { run } = require('./run');
-const { lint } = require('./lint');
 
 program
   .name('ok')
@@ -32,13 +31,6 @@ program
     await build(filename, opts);
     await run(opts);
   });
-
-program
-  .command('lint')
-  .description('Check a spec for ambiguity that leads to varying generated results')
-  .argument('<filename>', 'path to specification file')
-  .option('--fix', 'automatically fix ambiguities in the spec')
-  .action(lint);
 
 program
   .command('clean')

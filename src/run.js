@@ -1,13 +1,14 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+const chalk = require('chalk');
 
 const okDir = path.resolve('.ok');
 
 function readName() {
   const nameFile = path.join(okDir, 'name');
   if (!fs.existsSync(nameFile)) {
-    console.error('Error: No build found. Run `ok build` first.');
+    console.error(chalk.red('No build found. Run `ok build` first.'));
     process.exit(1);
   }
   return fs.readFileSync(nameFile, 'utf-8').trim();
@@ -20,11 +21,11 @@ async function run(opts) {
 
   const result = spawnSync('docker', ['image', 'inspect', imageTag], { stdio: 'ignore' });
   if (result.status !== 0) {
-    console.error(`Error: Image ${imageTag} not found. Run \`ok build\` first.`);
+    console.error(chalk.red(`Image ${imageTag} not found. Run \`ok build\` first.`));
     process.exit(1);
   }
 
-  console.log(`Running ${imageTag} on port ${port}...`);
+  console.log(chalk.cyan(`Running ${imageTag} on :${port}...`));
 
   const child = spawn('docker', [
     'run', '--rm',

@@ -2,7 +2,11 @@
 
 Write a markdown spec. Get a running app.
 
-`ok` is a CLI that turns a markdown specification into a containerized web app. You describe what you want, and `ok` builds it — code generation happens inside Docker via Claude Code, producing a clean image with nothing but your app.
+Software engineering is moving up one abstraction layer — from code to English*. The spec is the source, code is the build product.
+
+`ok` is a CLI that turns a markdown specification into a containerized web app. You describe what you want, and `ok` builds it — code generation happens inside Docker (Claude Code), producing a clean image with nothing but your app.
+
+*\*Or the written language of your choice.*
 
 ## Quick start
 

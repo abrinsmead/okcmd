@@ -1,12 +1,18 @@
 # ok
 
-Write a markdown spec. Get a running app.
+Write a spec. Get a running app.
 
-Software engineering is moving up one abstraction layer — from code to English*. The spec is the source, code is the build product.
+```
+ok serve spec.md
+```
 
-`ok` is a CLI that turns a markdown specification into a containerized web app. You describe what you want, and `ok` builds it — code generation happens inside Docker (Claude Code), producing a clean image with nothing but your app.
+Software engineering is moving up an abstraction layer — from code to prose. The spec becomes the source; code becomes the build artifact.
 
-*\*Or the written language of your choice.*
+`ok` is a CLI that turns a markdown specification into a containerized web app. Describe what you want in plain English*, and `ok` handles the rest: code generation runs inside Docker via [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview), producing a clean image with nothing but your app.
+
+No scaffolding. No boilerplate. Just a spec and a container.
+
+<sub>*Or any written language you prefer.</sub>
 
 ## Quick start
 

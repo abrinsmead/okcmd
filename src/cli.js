@@ -3,6 +3,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '..', '.env'), debug: f
 const { program } = require('commander');
 const { build } = require('./build');
 const { run } = require('./run');
+const { lint } = require('./lint');
 
 program
   .name('ok')
@@ -35,6 +36,13 @@ program
     await build(filename, opts);
     await run(filename, opts);
   });
+
+program
+  .command('lint')
+  .description('Check a spec for ambiguity and issues')
+  .argument('<filename>', 'path to specification file')
+  .option('--fix', 'automatically apply suggested fixes to the spec')
+  .action(lint);
 
 program
   .command('stop')

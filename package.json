@@ -2,7 +2,7 @@
   "name": "okcmd",
   "version": "1.0.0",
   "description": "Turn a markdown spec into a running, containerized web app",
-  "license": "ISC",
+  "license": "MIT",
   "author": "Alex",
   "type": "commonjs",
   "main": "bin/ok.js",

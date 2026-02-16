@@ -54,6 +54,8 @@ ok build <spec.md>     # Generate app and build Docker image
 ok run <spec.md>       # Run a previously built image
 ok serve <spec.md>     # Build + run in one step
 ok stop <spec.md>      # Stop a running container
+ok lint <spec.md>      # Check spec for issues before building
+ok lint <spec.md> --fix # Interactively fix issues
 ```
 
 Options:
@@ -63,6 +65,14 @@ ok run <spec.md> -p 8080                        # Expose on a different port
 ok serve <spec.md> -e DATABASE_URL=postgres://…  # Pass env vars to the app
 ok serve <spec.md> --env-file .env.app           # Pass env file to the app
 ```
+
+### Linting
+
+`ok lint` checks your spec for problems that would lead to bad or ambiguous code generation — missing details, underspecified UI/data/behavior, and contradictions.
+
+Findings are either **errors** or **warnings**. Only contradictions (where two parts of the spec directly conflict) are errors. Everything else is a warning. If any errors are found, `ok lint` exits with code 1.
+
+Use `--fix` to walk through each finding interactively. For each issue, you can accept the suggested fix or provide your own instructions for how to fix it. This requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) to be installed.
 
 ## Writing specs
 
@@ -104,26 +114,39 @@ A web-based todo list.
 ## Requirements
 
 - **Node.js** >= 18
-- **Docker** running locally
+- **Docker** running locally (OrbStack and other OCI-compliant runtimes work too)
 - **Anthropic API key** with access to Claude Code
 
-## How the build works
+## Architecture
 
-```
-┌─────────────────────────────────────────────┐
-│  Docker build (multi-stage)                 │
-│                                             │
-│  Stage 1: builder                           │
-│  ├── node:lts-alpine + Claude Code          │
-│  ├── Reads spec.md                          │
-│  ├── Generates app files via claude -p      │
-│  └── API key available only here (secret)   │
-│                                             │
-│  Stage 2: runtime                           │
-│  ├── Clean node:lts-alpine                  │
-│  ├── Copies /app/ from builder              │
-│  └── No API key, no build tools             │
-└─────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    spec["spec.md"] --> cli["ok CLI"]
+
+    cli --> lint["ok lint"]
+    cli --> build["ok build"]
+    cli --> run["ok run"]
+    cli --> serve["ok serve"]
+
+    serve -->|"1. build"| build
+    serve -->|"2. run"| run
+
+    lint -->|Anthropic API| analyze["Analyze spec for issues"]
+    analyze -->|"--fix"| claude_code_fix["Claude Code fixes spec"]
+
+    build --> check{"Spec changed?"}
+    check -->|No| skip["Skip build"]
+    check -->|Yes| docker["docker build"]
+
+    subgraph Docker["Docker multi-stage build"]
+        builder["Stage 1: builder\nnode:lts-alpine + Claude Code\nAPI key (secret mount)"]
+        builder -->|"claude -p"| generate["Generate app files"]
+        generate --> runtime["Stage 2: runtime\nClean node:lts-alpine\n/app/ + start.sh"]
+    end
+
+    docker --> builder
+    run --> container["Docker container\nlocalhost:PORT"]
+    runtime -.-> container
 ```
 
 The API key is mounted as a Docker secret — it exists only during the builder stage and is never baked into the final image.
@@ -135,9 +158,16 @@ bin/ok.js          Entry point (shebang)
 src/cli.js         Command definitions
 src/build.js       Build orchestration, Dockerfile generation
 src/run.js         Container lifecycle management
+src/lint.js        Spec linter — calls Anthropic API to find issues
 src/builder.mjs    Runs inside Docker — calls Claude Code to generate the app
 ```
 
+## FAQ
+
+**Why is the command called `ok`?** 
+
+Because it's easy to type.
+
 ## License
 
-ISC
+MIT

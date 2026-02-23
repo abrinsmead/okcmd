@@ -1,9 +1,11 @@
-const path = require('path');
+import path from 'path';
 require('dotenv').config({ path: path.resolve(__dirname, '..', '.env'), debug: false, quiet: true });
-const { program } = require('commander');
-const { build } = require('./build');
-const { run } = require('./run');
-const { lint } = require('./lint');
+import { program } from 'commander';
+import { build, deriveSpecName } from './build';
+import { run } from './run';
+import { lint } from './lint';
+import { spawnSync } from 'child_process';
+import chalk from 'chalk';
 
 program
   .name('ok')
@@ -32,9 +34,9 @@ program
   .option('-p, --port <number>', 'port to run the app on', '3000')
   .option('-e, --env <vars...>', 'environment variables to pass to the container (KEY=VALUE)')
   .option('--env-file <path>', 'path to env file to pass to the container')
-  .action(async (filename, opts) => {
+  .action(async (filename: string, opts: Record<string, unknown>) => {
     await build(filename, opts);
-    await run(filename, opts);
+    await run(filename, opts as Parameters<typeof run>[1]);
   });
 
 program
@@ -48,10 +50,7 @@ program
   .command('stop')
   .description('Stop a running app')
   .argument('<filename>', 'path to specification file')
-  .action((filename) => {
-    const { spawnSync } = require('child_process');
-    const { deriveSpecName } = require('./build');
-    const chalk = require('chalk');
+  .action((filename: string) => {
     const containerName = `ok-${deriveSpecName(filename)}`.replace(/[^a-zA-Z0-9_.-]/g, '-');
     const result = spawnSync('docker', ['stop', '-t', '2', containerName], { stdio: 'ignore' });
     if (result.status === 0) {

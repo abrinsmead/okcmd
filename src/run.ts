@@ -1,8 +1,14 @@
-const { spawn, spawnSync } = require('child_process');
-const chalk = require('chalk');
-const { deriveSpecName } = require('./build');
+import { spawn, spawnSync } from 'child_process';
+import chalk from 'chalk';
+import { deriveSpecName } from './build';
 
-async function run(filename, opts) {
+interface RunOpts {
+  port?: string;
+  env?: string[];
+  envFile?: string;
+}
+
+export async function run(filename: string, opts: RunOpts): Promise<void> {
   if (!filename) {
     console.error(chalk.red('Usage: ok run <spec.md>'));
     process.exit(1);
@@ -41,7 +47,7 @@ async function run(filename, opts) {
 
   console.log(chalk.cyan(`Running ${imageTag} on :${port}...`));
 
-  const envArgs = [];
+  const envArgs: string[] = [];
   if (opts.env) {
     for (const v of opts.env) envArgs.push('-e', v);
   }
@@ -67,5 +73,3 @@ async function run(filename, opts) {
   process.on('SIGTERM', stop);
   child.on('exit', (code) => process.exit(code ?? 0));
 }
-
-module.exports = { run };

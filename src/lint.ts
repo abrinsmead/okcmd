@@ -1,26 +1,50 @@
-const fs = require('fs');
-const path = require('path');
-const { spawnSync } = require('child_process');
-const chalk = require('chalk');
+import fs from 'fs';
+import path from 'path';
+import { spawnSync } from 'child_process';
+import chalk from 'chalk';
+
+interface Finding {
+  severity: 'error' | 'warning';
+  type: string;
+  line: number;
+  message: string;
+  suggestion: string;
+}
+
+interface ToolUseBlock {
+  type: 'tool_use';
+  name: string;
+  input: { findings: Finding[] };
+}
+
+interface ContentBlock {
+  type: string;
+  name?: string;
+  input?: { findings: Finding[] };
+}
+
+interface ClaudeResponse {
+  content: ContentBlock[];
+}
 
 const TOOL = {
   name: 'report_findings',
   description: 'Report all findings from analyzing the spec. Call this exactly once with the complete list of findings.',
   input_schema: {
-    type: 'object',
+    type: 'object' as const,
     required: ['findings'],
     properties: {
       findings: {
-        type: 'array',
+        type: 'array' as const,
         items: {
-          type: 'object',
+          type: 'object' as const,
           required: ['severity', 'type', 'line', 'message', 'suggestion'],
           properties: {
-            severity: { type: 'string', enum: ['error', 'warning'] },
-            type: { type: 'string', enum: ['ambiguity', 'missing-detail', 'contradiction', 'underspecified-ui', 'underspecified-data', 'underspecified-behavior'] },
-            line: { type: 'integer', description: 'Line number in the spec (1-indexed)' },
-            message: { type: 'string', description: 'What the problem is' },
-            suggestion: { type: 'string', description: 'How to fix it' },
+            severity: { type: 'string' as const, enum: ['error', 'warning'] },
+            type: { type: 'string' as const, enum: ['ambiguity', 'missing-detail', 'contradiction', 'underspecified-ui', 'underspecified-data', 'underspecified-behavior'] },
+            line: { type: 'integer' as const, description: 'Line number in the spec (1-indexed)' },
+            message: { type: 'string' as const, description: 'What the problem is' },
+            suggestion: { type: 'string' as const, description: 'How to fix it' },
           },
         },
       },
@@ -28,8 +52,8 @@ const TOOL = {
   },
 };
 
-async function callClaude(messages, tools) {
-  const body = {
+async function callClaude(messages: Array<{ role: string; content: string }>, tools?: typeof TOOL[]): Promise<ClaudeResponse> {
+  const body: Record<string, unknown> = {
     model: 'claude-opus-4-6',
     max_tokens: 4096,
     messages,
@@ -43,7 +67,7 @@ async function callClaude(messages, tools) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'x-api-key': process.env.ANTHROPIC_API_KEY!,
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify(body),
@@ -57,7 +81,7 @@ async function callClaude(messages, tools) {
   return res.json();
 }
 
-function buildPrompt(spec) {
+function buildPrompt(spec: string): string {
   return `You are a spec linter for "ok", a CLI that turns markdown specs into containerized web apps.
 
 Runtime constraints the generated app must satisfy:
@@ -86,7 +110,7 @@ ${spec}
 </spec>`;
 }
 
-function printFinding(finding, filename) {
+function printFinding(finding: Finding, filename: string): void {
   const sev = finding.severity === 'error'
     ? chalk.red(finding.severity.padEnd(7))
     : chalk.yellow(finding.severity.padEnd(7));
@@ -100,20 +124,20 @@ function printFinding(finding, filename) {
   }
 }
 
-function summarizeFindings(findings) {
+function summarizeFindings(findings: Finding[]): void {
   if (findings.length === 0) {
     console.log(chalk.green('No issues found.'));
     return;
   }
   const errors = findings.filter(f => f.severity === 'error').length;
   const warnings = findings.filter(f => f.severity === 'warning').length;
-  const parts = [];
+  const parts: string[] = [];
   if (errors) parts.push(`${errors} error${errors > 1 ? 's' : ''}`);
   if (warnings) parts.push(`${warnings} warning${warnings > 1 ? 's' : ''}`);
   console.log(`${findings.length} issue${findings.length > 1 ? 's' : ''} (${parts.join(', ')})`);
 }
 
-function ask(question) {
+function ask(question: string): Promise<string> {
   return new Promise((resolve) => {
     process.stdout.write(question);
     process.stdin.setRawMode(true);
@@ -130,11 +154,11 @@ function ask(question) {
   });
 }
 
-function prompt(question) {
+function prompt(question: string): Promise<string> {
   const { createInterface } = require('readline');
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => {
-    rl.question(question, (answer) => {
+    rl.question(question, (answer: string) => {
       rl.close();
       resolve(answer.trim());
     });
@@ -143,7 +167,7 @@ function prompt(question) {
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-function startSpinner(message) {
+function startSpinner(message: string): { stop: () => void } {
   let i = 0;
   const id = setInterval(() => {
     process.stdout.write(`\r${chalk.hex('#FF9900')(SPINNER_FRAMES[i++ % SPINNER_FRAMES.length])} ${message}`);
@@ -151,7 +175,7 @@ function startSpinner(message) {
   return { stop: () => { clearInterval(id); process.stdout.write('\r\x1b[K'); } };
 }
 
-function fixFinding(specPath, finding, userInstructions) {
+function fixFinding(specPath: string, finding: Finding, userInstructions?: string): boolean {
   let fixPrompt = `Fix this issue in ${specPath}:
 
 [${finding.severity}] Line ${finding.line} (${finding.type}): ${finding.message}
@@ -180,7 +204,11 @@ Output a single short sentence describing what you changed. Nothing else — no 
   return true;
 }
 
-async function lint(filename, opts) {
+interface LintOpts {
+  fix?: boolean;
+}
+
+export async function lint(filename: string, opts: LintOpts): Promise<void> {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.error(chalk.red('Missing ANTHROPIC_API_KEY'));
     process.exit(1);
@@ -205,7 +233,9 @@ async function lint(filename, opts) {
 
   spin.stop();
 
-  const toolBlock = response.content.find(b => b.type === 'tool_use' && b.name === 'report_findings');
+  const toolBlock = response.content.find(
+    (b): b is ToolUseBlock => b.type === 'tool_use' && b.name === 'report_findings'
+  );
   if (!toolBlock) {
     console.error(chalk.red('Unexpected response from API (no tool call)'));
     process.exit(1);
@@ -248,5 +278,3 @@ async function lint(filename, opts) {
     if (errors > 0) process.exit(1);
   }
 }
-
-module.exports = { lint };

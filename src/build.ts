@@ -1,19 +1,19 @@
-const fs = require('fs');
-const path = require('path');
-const { spawnSync } = require('child_process');
-const chalk = require('chalk');
+import fs from 'fs';
+import path from 'path';
+import { spawnSync } from 'child_process';
+import chalk from 'chalk';
 
 const okDir = path.resolve('.ok');
 
-function deriveSpecName(filename) {
+export function deriveSpecName(filename: string): string {
   return path.basename(filename, path.extname(filename));
 }
 
-function imageExists(imageTag) {
+function imageExists(imageTag: string): boolean {
   return spawnSync('docker', ['image', 'inspect', imageTag], { stdio: 'ignore' }).status === 0;
 }
 
-function extractSpec(imageTag) {
+function extractSpec(imageTag: string): string | null {
   const cid = spawnSync('docker', ['create', imageTag], { encoding: 'utf-8' });
   if (cid.status !== 0) return null;
 
@@ -34,7 +34,7 @@ function extractSpec(imageTag) {
 
 const BUILDER_BASE = 'ok-builder-base:latest';
 
-function ensureBuilderBase() {
+function ensureBuilderBase(): void {
   if (imageExists(BUILDER_BASE)) return;
   console.log(chalk.dim('Building base image (one-time)...'));
   const tmpDir = path.join(okDir, '.base');
@@ -54,9 +54,7 @@ USER builder
   }
 }
 
-function generateDockerfile(isUpdate, imageTag) {
-  // For updates: start from the existing app image, add builder tools
-  // For fresh builds: start from the builder base
+function generateDockerfile(isUpdate: boolean, imageTag: string): string {
   const builderFrom = isUpdate
     ? `FROM ${imageTag} AS prev
 FROM ${BUILDER_BASE} AS builder
@@ -81,7 +79,7 @@ CMD ["sh", "start.sh"]
 `;
 }
 
-async function build(filename, opts) {
+export async function build(filename: string, opts?: Record<string, unknown>): Promise<void> {
   // 1. Validate
   if (!process.env.ANTHROPIC_API_KEY) {
     console.error(chalk.red('Missing ANTHROPIC_API_KEY'));
@@ -114,7 +112,7 @@ async function build(filename, opts) {
   // 4. Stage build context
   fs.mkdirSync(okDir, { recursive: true });
   fs.writeFileSync(path.join(okDir, 'spec.md'), spec);
-  fs.copyFileSync(path.resolve(__dirname, 'builder.mjs'), path.join(okDir, 'builder.mjs'));
+  fs.copyFileSync(path.resolve(__dirname, '..', 'src', 'builder.mjs'), path.join(okDir, 'builder.mjs'));
   fs.writeFileSync(path.join(okDir, 'Dockerfile'), generateDockerfile(hasImage, imageTag));
 
   const keyFile = path.join(okDir, '.api_key');
@@ -140,5 +138,3 @@ async function build(filename, opts) {
 
   console.log(chalk.green(`${imageTag} built.`));
 }
-
-module.exports = { build, deriveSpecName };

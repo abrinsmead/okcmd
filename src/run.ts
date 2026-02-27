@@ -58,7 +58,8 @@ export async function run(filename: string, opts: RunOpts): Promise<void> {
   const child = spawn('docker', [
     'run', '--rm', '--init',
     '--name', containerName,
-    '-p', `${port}:3000`,
+    '-p', `${port}:${port}`,
+    '-e', `PORT=${port}`,
     ...envArgs,
     imageTag,
   ], {

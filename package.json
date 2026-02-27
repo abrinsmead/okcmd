@@ -1,6 +1,6 @@
 {
   "name": "okcmd",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Turn a markdown spec into a running, containerized web app",
   "license": "MIT",
   "author": "Alex",

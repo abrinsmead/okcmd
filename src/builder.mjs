@@ -14,6 +14,7 @@ const requirements = `Requirements:
 - For web apps with a frontend: use Vite (npm create vite@latest my-app -- --template react)
   - Build the frontend to static files, serve them from the backend
 - For the backend: a single Express server is fine (or just serve static files if no API needed)
+- Use ESM imports (import/export), not CommonJS require(). If package.json has "type": "module", all .js files must use ESM
 - Do NOT use Next.js, Remix, or heavy frameworks
 - Keep it simple: flat file structure, minimal dependencies, no unnecessary abstractions`;
 
@@ -144,7 +145,9 @@ function listFiles(dir, prefix = '') {
   for (const e of entries) {
     const rel = prefix ? `${prefix}/${e.name}` : e.name;
     if (e.isDirectory()) {
-      files = files.concat(listFiles(join(dir, e.name), rel));
+      if (e.name !== 'node_modules') {
+        files = files.concat(listFiles(join(dir, e.name), rel));
+      }
     } else if (e.isFile()) {
       files.push(rel);
     }

@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import chalk from 'chalk';
+import * as ui from './ui';
 import { createRuntime, RuntimeName } from './runtime';
 
 export function deriveSpecName(filename: string): string {
@@ -10,7 +10,7 @@ export function deriveSpecName(filename: string): string {
 export async function build(filename: string, opts?: { runtime?: RuntimeName }): Promise<void> {
   const specPath = path.resolve(filename);
   if (!fs.existsSync(specPath)) {
-    console.error(chalk.red(`File not found: ${specPath}`));
+    ui.error(`File not found: ${specPath}`);
     process.exit(1);
   }
 

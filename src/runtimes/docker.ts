@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import chalk from 'chalk';
+import * as ui from '../ui';
 import type { Runtime, RunOpts } from '../runtime';
 
 const okDir = path.resolve('.ok');
@@ -31,9 +32,10 @@ export class DockerRuntime implements Runtime {
     }
   }
 
-  private ensureBuilderBase(): void {
+  private async ensureBuilderBase(): Promise<void> {
     if (this.imageExists(BUILDER_BASE)) return;
-    console.log(chalk.dim('Building base image (one-time)...'));
+    ui.step('Building base image (one-time)');
+    ui.bar();
     const tmpDir = path.join(okDir, '.base');
     fs.mkdirSync(tmpDir, { recursive: true });
     fs.writeFileSync(path.join(tmpDir, 'Dockerfile'), `FROM node:lts-alpine
@@ -43,12 +45,22 @@ RUN mkdir -p /app && chown builder /app
 WORKDIR /app
 USER builder
 `);
-    const result = spawnSync('docker', ['build', '-t', BUILDER_BASE, tmpDir], { stdio: 'inherit' });
-    fs.rmSync(tmpDir, { recursive: true });
-    if (result.status !== 0) {
-      console.error(chalk.red('Failed to build base image'));
+    const proc = spawn('docker', ['build', '-t', BUILDER_BASE, tmpDir], { stdio: ['ignore', 'pipe', 'pipe'] });
+    ui.prefixStream(proc.stdout);
+    ui.prefixStream(proc.stderr);
+
+    const exitCode = await new Promise<number | null>((resolve) => {
+      proc.on('close', resolve);
+    });
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+
+    if (exitCode !== 0) {
+      ui.error('Failed to build base image');
       process.exit(1);
     }
+    ui.stepDone('Base image ready');
+    ui.bar();
   }
 
   private generateDockerfile(isUpdate: boolean, imageTag: string): string {
@@ -78,26 +90,35 @@ CMD ["sh", "start.sh"]
 
   async build(specName: string, specContent: string): Promise<void> {
     if (!process.env.ANTHROPIC_API_KEY) {
-      console.error(chalk.red('Missing ANTHROPIC_API_KEY'));
+      ui.error('Missing ANTHROPIC_API_KEY in .env');
       process.exit(1);
     }
 
     const imageTag = `ok-${specName}:latest`;
 
+    ui.intro(`ok build ${chalk.bold(specName)}`);
+
     // Check existing image
+    ui.step('Checking for existing image');
     const hasImage = this.imageExists(imageTag);
     if (hasImage) {
       const oldSpec = this.extractSpec(imageTag);
       if (oldSpec === specContent) {
-        console.log(chalk.dim('Spec unchanged, skipping.'));
+        ui.stepDone('Spec unchanged — skipping build');
+        ui.outro(chalk.dim('Nothing to do'));
         return;
       }
+      ui.info('Spec changed — rebuilding');
+    } else {
+      ui.info('No existing image found');
     }
+    ui.bar();
 
     // Ensure builder base image exists
-    this.ensureBuilderBase();
+    await this.ensureBuilderBase();
 
     // Stage build context
+    ui.step('Staging build context');
     fs.mkdirSync(okDir, { recursive: true });
     fs.writeFileSync(path.join(okDir, 'spec.md'), specContent);
     fs.copyFileSync(path.resolve(__dirname, '..', '..', 'src', 'builder.mjs'), path.join(okDir, 'builder.mjs'));
@@ -105,26 +126,39 @@ CMD ["sh", "start.sh"]
 
     const keyFile = path.join(okDir, '.api_key');
     fs.writeFileSync(keyFile, process.env.ANTHROPIC_API_KEY, { mode: 0o600 });
+    ui.stepDone('Build context staged');
+    ui.bar();
 
     // Build
-    console.log(chalk.cyan(`${hasImage ? 'Updating' : 'Building'} ${imageTag}...`));
+    ui.step(`${hasImage ? 'Updating' : 'Building'} ${chalk.bold(imageTag)}`);
+    ui.bar();
 
-    const buildResult = spawnSync('docker', [
+    const buildProc = spawn('docker', [
       'build',
       '--secret', `id=api_key,src=${keyFile}`,
       '-t', imageTag,
       okDir,
-    ], { stdio: 'inherit' });
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
-    if (buildResult.status !== 0) {
-      console.error(chalk.red(`Docker build failed (exit ${buildResult.status})`));
+    ui.prefixStream(buildProc.stdout);
+    ui.prefixStream(buildProc.stderr);
+
+    const exitCode = await new Promise<number | null>((resolve) => {
+      buildProc.on('close', resolve);
+    });
+
+    ui.bar();
+
+    if (exitCode !== 0) {
+      ui.error(`Docker build failed (exit ${exitCode})`);
+      fs.rmSync(okDir, { recursive: true, force: true });
       process.exit(1);
     }
 
     // Clean up
-    fs.rmSync(okDir, { recursive: true });
+    fs.rmSync(okDir, { recursive: true, force: true });
 
-    console.log(chalk.green(`${imageTag} built.`));
+    ui.outro(`${chalk.green('Done!')} Built ${chalk.bold(imageTag)}`);
   }
 
   async run(specName: string, opts: RunOpts): Promise<void> {
@@ -133,7 +167,7 @@ CMD ["sh", "start.sh"]
 
     const result = spawnSync('docker', ['image', 'inspect', imageTag], { stdio: 'ignore' });
     if (result.status !== 0) {
-      console.error(chalk.red(`Image ${imageTag} not found. Run \`ok build\` first.`));
+      ui.error(`Image ${imageTag} not found. Run \`ok build\` first.`);
       process.exit(1);
     }
 
@@ -147,17 +181,19 @@ CMD ["sh", "start.sh"]
       const named = spawnSync('docker', ['inspect', '--format', '{{.Image}}', containerName], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
       const imageId = spawnSync('docker', ['image', 'inspect', '--format', '{{.Id}}', imageTag], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
       if (named.status === 0 && imageId.status === 0 && named.stdout.trim() === imageId.stdout.trim()) {
-        console.log(chalk.dim(`Already running ${imageTag} on :${port}`));
+        ui.info(`Already running ${imageTag} on :${port}`);
         return;
       }
-      console.log(chalk.dim('Stopping old container...'));
+      ui.info('Stopping old container...');
       spawnSync('docker', ['rm', '-f', ...runningIds], { stdio: 'ignore' });
     }
 
     // Also remove named container if it exists but isn't running
     spawnSync('docker', ['rm', '-f', containerName], { stdio: 'ignore' });
 
-    console.log(chalk.cyan(`Running ${imageTag} on :${port}...`));
+    ui.intro(`ok run ${chalk.bold(specName)}`);
+    ui.step(`Starting on port ${chalk.bold(port)}`);
+    ui.bar();
 
     const envArgs: string[] = [];
     if (opts.env) {
@@ -191,9 +227,9 @@ CMD ["sh", "start.sh"]
     const containerName = `ok-${specName}`.replace(/[^a-zA-Z0-9_.-]/g, '-');
     const result = spawnSync('docker', ['stop', '-t', '2', containerName], { stdio: 'ignore' });
     if (result.status === 0) {
-      console.log(chalk.dim(`Stopped ${containerName}`));
+      ui.success(`Stopped ${containerName}`);
     } else {
-      console.log(chalk.dim(`${containerName} is not running`));
+      ui.info(`${containerName} is not running`);
     }
   }
 
@@ -206,9 +242,9 @@ CMD ["sh", "start.sh"]
 
     const result = spawnSync('docker', ['rmi', imageTag], { stdio: 'ignore' });
     if (result.status === 0) {
-      console.log(chalk.dim(`Removed image ${imageTag}`));
+      ui.success(`Removed image ${imageTag}`);
     } else {
-      console.log(chalk.dim(`Image ${imageTag} not found`));
+      ui.info(`Image ${imageTag} not found`);
     }
   }
 }

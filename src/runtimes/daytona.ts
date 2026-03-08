@@ -1,22 +1,21 @@
 import fs from 'fs';
 import path from 'path';
-import { spawnSync } from 'child_process';
 import chalk from 'chalk';
+import * as ui from '../ui';
 import type { Runtime, RunOpts } from '../runtime';
-import { DockerRuntime } from './docker';
 
 const LABEL_KEY = 'ok-spec';
 const APP_DIR = '/home/daytona/app';
+const BACKUP_DIR = '/home/daytona/app.bak';
+const RUNTIME_ENV = 'Ubuntu sandbox — Node.js is available, install anything else via apt/npm';
 
 export class DaytonaRuntime implements Runtime {
-  private docker = new DockerRuntime();
-
   private getDaytona() {
     const { Daytona } = require('@daytonaio/sdk');
 
     const apiKey = process.env.DAYTONA_API_KEY;
     if (!apiKey) {
-      console.error(chalk.red('Missing DAYTONA_API_KEY'));
+      ui.error('Missing DAYTONA_API_KEY');
       process.exit(1);
     }
 
@@ -35,99 +34,153 @@ export class DaytonaRuntime implements Runtime {
     }
   }
 
-  private extractAppFiles(imageTag: string): string {
-    const tmpDir = path.join('.ok', '.extract');
-    fs.mkdirSync(tmpDir, { recursive: true });
-
-    const cid = spawnSync('docker', ['create', imageTag], { encoding: 'utf-8' });
-    if (cid.status !== 0) {
-      throw new Error('Failed to create container for extraction');
+  private async readRemoteFile(sandbox: any, remotePath: string): Promise<string | null> {
+    try {
+      const result = await sandbox.process.executeCommand(`cat ${remotePath}`);
+      return result.exitCode === 0 ? result.result : null;
+    } catch {
+      return null;
     }
-    const containerId = cid.stdout.trim();
-
-    spawnSync('docker', ['cp', `${containerId}:/app/.`, tmpDir], { stdio: 'ignore' });
-    spawnSync('docker', ['rm', containerId], { stdio: 'ignore' });
-
-    return tmpDir;
   }
 
-  private async deploy(sandbox: any, imageTag: string, specName: string): Promise<void> {
-    console.log(chalk.cyan(`Deploying ${specName} to sandbox...`));
-    const extractDir = this.extractAppFiles(imageTag);
+  private async ensureClaude(sandbox: any): Promise<void> {
+    const check = await sandbox.process.executeCommand('which claude');
+    if (check.exitCode === 0) return;
 
-    try {
-      // Stop any running app first
-      console.log(chalk.dim('Stopping existing app...'));
-      await sandbox.process.executeCommand('fuser -k 3000/tcp || true');
-
-      // Clean existing app dir and recreate
-      console.log(chalk.dim('Uploading app files...'));
-      await sandbox.process.executeCommand(`rm -rf ${APP_DIR} && mkdir -p ${APP_DIR}`);
-
-      // Upload all extracted files, rewriting /app paths for sandbox
-      const files = this.listFiles(extractDir);
-      for (const file of files) {
-        let content = fs.readFileSync(path.join(extractDir, file));
-        if (file === 'start.sh') {
-          content = Buffer.from(content.toString('utf-8').replace(/\/app\b/g, APP_DIR));
-        }
-        await sandbox.fs.uploadFile(content, `${APP_DIR}/${file}`);
-      }
-      console.log(chalk.dim(`Uploaded ${files.length} files.`));
-
-      // Install npm dependencies if package.json exists
-      if (files.includes('package.json')) {
-        console.log(chalk.dim('Installing dependencies...'));
-        const installResult = await sandbox.process.executeCommand(
-          'npm install --production',
-          APP_DIR
-        );
-        if (installResult.exitCode !== 0) {
-          console.error(chalk.red('npm install failed:'), installResult.result);
-          process.exit(1);
-        }
-      }
-    } finally {
-      fs.rmSync(extractDir, { recursive: true });
+    ui.bar();
+    ui.step('Installing Claude Code in sandbox');
+    const install = await sandbox.process.executeCommand('npm install -g @anthropic-ai/claude-code');
+    if (install.exitCode !== 0) {
+      ui.error('Failed to install Claude Code');
+      if (install.result) console.error(install.result);
+      process.exit(1);
     }
-
-    console.log(chalk.green(`Deployed ${specName} to sandbox.`));
+    ui.stepDone('Claude Code installed');
   }
 
   async build(specName: string, specContent: string): Promise<void> {
-    // Step 1: Docker build (handles spec diff, code generation)
-    const imageTag = `ok-${specName}:latest`;
-    const imageExisted = this.docker.imageExists(imageTag);
-    const oldSpec = imageExisted ? this.docker.extractSpec(imageTag) : null;
-    const specChanged = oldSpec !== specContent;
-
-    if (specChanged) {
-      console.log(chalk.cyan(imageExisted ? 'Spec changed, rebuilding...' : 'Building...'));
-      await this.docker.build(specName, specContent);
-    } else {
-      console.log(chalk.dim('No changes detected.'));
+    if (!process.env.ANTHROPIC_API_KEY) {
+      ui.error('Missing ANTHROPIC_API_KEY in .env');
+      process.exit(1);
     }
 
-    // Step 2: Ensure sandbox exists
+    ui.intro(`ok build ${chalk.bold(specName)} ${chalk.dim('(daytona)')}`);
+
+    // Ensure sandbox exists
     const daytona = this.getDaytona();
     let sandbox = await this.findSandbox(daytona, specName);
-    const isNewSandbox = !sandbox;
 
     if (!sandbox) {
-      console.log(chalk.cyan(`Creating sandbox for ${specName}...`));
-      sandbox = await daytona.create({
-        labels: { [LABEL_KEY]: specName },
-      });
-      console.log(chalk.dim(`Sandbox created: ${sandbox.id}`));
+      ui.step(`Creating sandbox for ${chalk.bold(specName)}`);
+      sandbox = await daytona.create({ labels: { [LABEL_KEY]: specName } });
+      ui.stepDone(`Sandbox created: ${sandbox.id}`);
     } else {
-      console.log(chalk.dim(`Using existing sandbox: ${sandbox.id}`));
+      ui.stepDone(`Using existing sandbox: ${sandbox.id}`);
       await sandbox.start();
     }
+    ui.bar();
 
-    // Step 3: Deploy if spec changed or sandbox is new
-    if (specChanged || isNewSandbox) {
-      await this.deploy(sandbox, imageTag, specName);
+    // Check if spec changed
+    ui.step('Checking for changes');
+    const existingSpec = await this.readRemoteFile(sandbox, `${APP_DIR}/spec.md`);
+    if (existingSpec === specContent) {
+      ui.stepDone('Spec unchanged — skipping build');
+      ui.outro(chalk.dim('Nothing to do'));
+      return;
     }
+
+    const isUpdate = existingSpec !== null;
+    ui.info(isUpdate ? 'Spec changed — rebuilding' : 'No existing app found');
+    ui.bar();
+
+    // Ensure Claude Code is installed
+    await this.ensureClaude(sandbox);
+
+    // Backup existing app for rollback
+    if (isUpdate) {
+      ui.bar();
+      ui.step('Backing up existing app');
+      await sandbox.process.executeCommand(`rm -rf ${BACKUP_DIR} && cp -r ${APP_DIR} ${BACKUP_DIR}`);
+      ui.stepDone('Backup created');
+    }
+
+    // Ensure app dir exists and upload spec + builder
+    await sandbox.process.executeCommand(`mkdir -p ${APP_DIR}`);
+
+    const builderSrc = fs.readFileSync(
+      path.resolve(__dirname, '..', '..', 'src', 'builder.mjs'),
+      'utf-8'
+    );
+    await sandbox.fs.uploadFile(Buffer.from(specContent), `${APP_DIR}/spec.md`);
+    await sandbox.fs.uploadFile(Buffer.from(builderSrc), `${APP_DIR}/builder.mjs`);
+
+    // Write API key to temp file (avoid shell interpolation issues)
+    await sandbox.fs.uploadFile(
+      Buffer.from(process.env.ANTHROPIC_API_KEY),
+      '/tmp/.ok-api-key'
+    );
+
+    // Run builder in a session so we can stream logs
+    ui.bar();
+    ui.step(`${isUpdate ? 'Updating' : 'Building'} ${chalk.bold(specName)} in sandbox`);
+    ui.bar();
+
+    const sessionId = `ok-build-${specName}`;
+    try { await sandbox.process.deleteSession(sessionId); } catch { /* no existing session */ }
+    await sandbox.process.createSession(sessionId);
+
+    const { cmdId } = await sandbox.process.executeSessionCommand(sessionId, {
+      command: `ANTHROPIC_API_KEY=$(cat /tmp/.ok-api-key) APP_DIR=${APP_DIR} RUNTIME_ENV='${RUNTIME_ENV}' node ${APP_DIR}/builder.mjs`,
+      runAsync: true,
+    });
+
+    // Stream logs in background
+    sandbox.process.getSessionCommandLogs(
+      sessionId,
+      cmdId,
+      (stdout: string) => ui.prefixLines(stdout),
+      (stderr: string) => ui.prefixLines(stderr),
+    ).catch(() => {});
+
+    // Poll for command completion
+    let buildExitCode: number | null = null;
+    while (buildExitCode === null) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const cmd = await sandbox.process.getSessionCommand(sessionId, cmdId);
+      if (cmd.exitCode !== undefined && cmd.exitCode !== null) {
+        buildExitCode = cmd.exitCode;
+      }
+    }
+
+    // Kill any processes left behind by validation (start.sh, node server.js, etc.)
+    await sandbox.process.executeCommand('pkill -f "node server" || true; pkill -f "start.sh" || true');
+
+    // Clean up session
+    try { await sandbox.process.deleteSession(sessionId); } catch { /* ignore */ }
+
+    ui.bar();
+
+    // Clean up secrets and builder script
+    await sandbox.process.executeCommand(`rm -f /tmp/.ok-api-key ${APP_DIR}/builder.mjs ${APP_DIR}/.prompt.txt`);
+
+    if (buildExitCode !== 0) {
+      ui.error('Build failed in sandbox');
+
+      if (isUpdate) {
+        ui.info('Rolling back...');
+        await sandbox.process.executeCommand(`rm -rf ${APP_DIR} && mv ${BACKUP_DIR} ${APP_DIR}`);
+      } else {
+        await sandbox.process.executeCommand(`rm -rf ${APP_DIR}`);
+      }
+      process.exit(1);
+    }
+
+    // Success — clean up backup
+    if (isUpdate) {
+      await sandbox.process.executeCommand(`rm -rf ${BACKUP_DIR}`);
+    }
+
+    ui.outro(`${chalk.green('Done!')} Built ${chalk.bold(specName)} in sandbox`);
   }
 
   async run(specName: string, opts: RunOpts): Promise<void> {
@@ -135,11 +188,11 @@ export class DaytonaRuntime implements Runtime {
     const sandbox = await this.findSandbox(daytona, specName);
 
     if (!sandbox) {
-      console.error(chalk.red(`No sandbox found for ${specName}. Run \`ok build\` first.`));
+      ui.error(`No sandbox found for ${specName}. Run \`ok build\` first.`);
       process.exit(1);
     }
 
-    console.log(chalk.dim(`Starting sandbox ${sandbox.id}...`));
+    ui.step(`Starting sandbox ${chalk.bold(sandbox.id)}`);
     await sandbox.start();
     const port = opts.port || '3000';
 
@@ -148,9 +201,9 @@ export class DaytonaRuntime implements Runtime {
     if (check.exitCode === 0) {
       try {
         const preview = await sandbox.getSignedPreviewUrl(parseInt(port, 10));
-        console.log(chalk.cyan(`${specName} already running on ${preview.url}`));
+        ui.success(`${specName} already running on ${preview.url}`);
       } catch {
-        console.log(chalk.cyan(`${specName} already running on port ${port}`));
+        ui.success(`${specName} already running on port ${port}`);
       }
       return;
     }
@@ -185,35 +238,34 @@ export class DaytonaRuntime implements Runtime {
     });
 
     // Poll until port is listening or the process exits
-    console.log(chalk.dim('Starting app...'));
+    ui.info('Starting app...');
     for (let i = 0; i < 30; i++) {
       await new Promise(resolve => setTimeout(resolve, 2000));
 
       // Check if process is still running
       const cmd = await sandbox.process.getSessionCommand(sessionId, cmdId);
       if (cmd.exitCode !== undefined && cmd.exitCode !== null) {
-        // Process exited — fetch logs and show error
         const logs = await sandbox.process.getSessionCommandLogs(sessionId, cmdId);
-        console.error(chalk.red('App failed to start:'));
+        ui.error('App failed to start:');
         if (logs.stderr) console.error(logs.stderr);
         else if (logs.stdout) console.error(logs.stdout);
         process.exit(1);
       }
 
       // Check if port is listening
-      const check = await sandbox.process.executeCommand(`fuser ${port}/tcp 2>/dev/null`);
-      if (check.exitCode === 0) {
+      const portCheck = await sandbox.process.executeCommand(`fuser ${port}/tcp 2>/dev/null`);
+      if (portCheck.exitCode === 0) {
         try {
           const preview = await sandbox.getSignedPreviewUrl(parseInt(port, 10));
-          console.log(chalk.cyan(`Running ${specName} on ${preview.url}`));
+          ui.outro(`Running ${chalk.bold(specName)} on ${chalk.cyan(preview.url)}`);
         } catch {
-          console.log(chalk.cyan(`Running ${specName} on port ${port}`));
+          ui.outro(`Running ${chalk.bold(specName)} on port ${chalk.bold(port)}`);
         }
         return;
       }
     }
 
-    console.error(chalk.red('Timed out waiting for app to start'));
+    ui.error('Timed out waiting for app to start');
     process.exit(1);
   }
 
@@ -222,13 +274,13 @@ export class DaytonaRuntime implements Runtime {
     const sandbox = await this.findSandbox(daytona, specName);
 
     if (!sandbox) {
-      console.log(chalk.dim(`No sandbox found for ${specName}`));
+      ui.info(`No sandbox found for ${specName}`);
       return;
     }
 
-    console.log(chalk.dim(`Stopping app in sandbox ${sandbox.id}...`));
+    ui.step('Stopping app...');
     await sandbox.process.executeCommand('fuser -k 3000/tcp || true');
-    console.log(chalk.green(`Stopped ${specName}`));
+    ui.success(`Stopped ${specName}`);
   }
 
   async destroy(specName: string): Promise<void> {
@@ -236,28 +288,11 @@ export class DaytonaRuntime implements Runtime {
     const sandbox = await this.findSandbox(daytona, specName);
 
     if (sandbox) {
-      console.log(chalk.dim(`Deleting sandbox ${sandbox.id}...`));
+      ui.step(`Deleting sandbox ${chalk.bold(sandbox.id)}`);
       await sandbox.delete();
-      console.log(chalk.green(`Deleted sandbox for ${specName}`));
+      ui.success(`Deleted sandbox for ${specName}`);
     } else {
-      console.log(chalk.dim(`No sandbox found for ${specName}`));
+      ui.info(`No sandbox found for ${specName}`);
     }
-
-    // Also clean up the Docker image
-    await this.docker.destroy(specName);
-  }
-
-  private listFiles(dir: string, prefix = ''): string[] {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    let files: string[] = [];
-    for (const e of entries) {
-      const rel = prefix ? `${prefix}/${e.name}` : e.name;
-      if (e.isDirectory()) {
-        files = files.concat(this.listFiles(path.join(dir, e.name), rel));
-      } else if (e.isFile()) {
-        files.push(rel);
-      }
-    }
-    return files;
   }
 }

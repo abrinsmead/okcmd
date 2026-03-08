@@ -1,17 +1,17 @@
 import fs from 'fs';
 import path from 'path';
-import { spawnSync } from 'child_process';
 import chalk from 'chalk';
+import * as ui from '../ui';
 import type { Runtime, RunOpts } from '../runtime';
-import { DockerRuntime } from './docker';
 
 const APP_DIR = '/blaxel/app';
+const BACKUP_DIR = '/blaxel/app.bak';
 const APP_PROCESS = 'ok-app';
+const BUILD_PROCESS = 'ok-build';
 const PREVIEW_NAME = 'ok-preview';
+const RUNTIME_ENV = 'Linux sandbox — Node.js is available, install anything else via apt/npm';
 
 export class BlaxelRuntime implements Runtime {
-  private docker = new DockerRuntime();
-
   private async getSandbox(specName: string, create = false) {
     const { SandboxInstance } = require('@blaxel/core');
     const name = `ok-${specName}`;
@@ -33,124 +33,177 @@ export class BlaxelRuntime implements Runtime {
     }
   }
 
-  private extractAppFiles(imageTag: string): string {
-    const tmpDir = path.join('.ok', '.extract');
-    fs.mkdirSync(tmpDir, { recursive: true });
-
-    const cid = spawnSync('docker', ['create', imageTag], { encoding: 'utf-8' });
-    if (cid.status !== 0) {
-      throw new Error('Failed to create container for extraction');
-    }
-    const containerId = cid.stdout.trim();
-
-    spawnSync('docker', ['cp', `${containerId}:/app/.`, tmpDir], { stdio: 'ignore' });
-    spawnSync('docker', ['rm', containerId], { stdio: 'ignore' });
-
-    return tmpDir;
-  }
-
-  private async deploy(sandbox: any, imageTag: string, specName: string): Promise<void> {
-    console.log(chalk.cyan(`Deploying ${specName} to sandbox...`));
-    const extractDir = this.extractAppFiles(imageTag);
-
+  private async readRemoteFile(sandbox: any, remotePath: string): Promise<string | null> {
     try {
-      // Stop any running app
-      try {
-        console.log(chalk.dim('Stopping existing app...'));
-        await sandbox.process.kill(APP_PROCESS);
-      } catch { /* no existing process */ }
-
-      // Clean and recreate app dir
-      console.log(chalk.dim('Uploading app files...'));
-      await sandbox.process.exec({
-        command: `rm -rf ${APP_DIR} && mkdir -p ${APP_DIR}`,
+      const result = await sandbox.process.exec({
+        command: `cat ${remotePath}`,
         waitForCompletion: true,
       });
-
-      // Build file tree for batch upload
-      const files = this.listFiles(extractDir);
-      const textFiles: { path: string; content: string }[] = [];
-      const binaryFiles: { rel: string; abs: string }[] = [];
-
-      for (const file of files) {
-        const absPath = path.join(extractDir, file);
-        const buf = fs.readFileSync(absPath);
-
-        // Check for binary content
-        if (buf.includes(0)) {
-          binaryFiles.push({ rel: file, abs: absPath });
-        } else {
-          let content = buf.toString('utf-8');
-          if (file === 'start.sh') {
-            content = content.replace(/\/app\b/g, APP_DIR);
-          }
-          textFiles.push({ path: file, content });
-        }
-      }
-
-      // Batch upload text files
-      if (textFiles.length > 0) {
-        await sandbox.fs.writeTree(textFiles, APP_DIR);
-      }
-
-      // Upload binary files individually
-      for (const { rel, abs } of binaryFiles) {
-        const data = fs.readFileSync(abs);
-        await sandbox.fs.writeBinary(`${APP_DIR}/${rel}`, data);
-      }
-
-      console.log(chalk.dim(`Uploaded ${files.length} files.`));
-
-      // Install npm dependencies if package.json exists
-      if (files.includes('package.json')) {
-        console.log(chalk.dim('Installing dependencies...'));
-        const result = await sandbox.process.exec({
-          command: 'npm install --production',
-          workingDir: APP_DIR,
-          waitForCompletion: true,
-          timeout: 120000,
-        });
-        if (result.exitCode !== 0) {
-          console.error(chalk.red('npm install failed:'), result.logs?.stderr || '');
-          process.exit(1);
-        }
-      }
-    } finally {
-      fs.rmSync(extractDir, { recursive: true });
+      if (result.exitCode !== 0) return null;
+      return result.logs?.stdout ?? result.stdout ?? null;
+    } catch {
+      return null;
     }
+  }
 
-    console.log(chalk.green(`Deployed ${specName} to sandbox.`));
+  private async ensureClaude(sandbox: any): Promise<void> {
+    const check = await sandbox.process.exec({
+      command: 'which claude',
+      waitForCompletion: true,
+    });
+    if (check.exitCode === 0) return;
+
+    ui.bar();
+    ui.step('Installing Claude Code in sandbox');
+    const install = await sandbox.process.exec({
+      command: 'npm install -g @anthropic-ai/claude-code',
+      waitForCompletion: true,
+      timeout: 120000,
+    });
+    if (install.exitCode !== 0) {
+      ui.error('Failed to install Claude Code');
+      process.exit(1);
+    }
+    ui.stepDone('Claude Code installed');
   }
 
   async build(specName: string, specContent: string): Promise<void> {
-    // Step 1: Docker build (handles spec diff, code generation)
-    const imageTag = `ok-${specName}:latest`;
-    const imageExisted = this.docker.imageExists(imageTag);
-    const oldSpec = imageExisted ? this.docker.extractSpec(imageTag) : null;
-    const specChanged = oldSpec !== specContent;
-
-    if (specChanged) {
-      console.log(chalk.cyan(imageExisted ? 'Spec changed, rebuilding...' : 'Building...'));
-      await this.docker.build(specName, specContent);
-    } else {
-      console.log(chalk.dim('No changes detected.'));
+    if (!process.env.ANTHROPIC_API_KEY) {
+      ui.error('Missing ANTHROPIC_API_KEY in .env');
+      process.exit(1);
     }
 
-    // Step 2: Ensure sandbox exists
-    console.log(chalk.dim(`Connecting to sandbox ok-${specName}...`));
+    ui.intro(`ok build ${chalk.bold(specName)} ${chalk.dim('(blaxel)')}`);
+
+    // Ensure sandbox exists
+    ui.step(`Connecting to sandbox ${chalk.bold(`ok-${specName}`)}`);
     const sandbox = await this.getSandbox(specName, true);
+    ui.stepDone('Sandbox ready');
+    ui.bar();
 
-    // Step 3: Deploy if spec changed or first build
-    if (specChanged || !imageExisted) {
-      await this.deploy(sandbox, imageTag, specName);
+    // Check if spec changed
+    ui.step('Checking for changes');
+    const existingSpec = await this.readRemoteFile(sandbox, `${APP_DIR}/spec.md`);
+    if (existingSpec === specContent) {
+      ui.stepDone('Spec unchanged — skipping build');
+      ui.outro(chalk.dim('Nothing to do'));
+      return;
     }
+
+    const isUpdate = existingSpec !== null;
+    ui.info(isUpdate ? 'Spec changed — rebuilding' : 'No existing app found');
+
+    // Ensure Claude Code is installed
+    await this.ensureClaude(sandbox);
+
+    // Backup existing app for rollback
+    if (isUpdate) {
+      ui.bar();
+      ui.step('Backing up existing app');
+      await sandbox.process.exec({
+        command: `rm -rf ${BACKUP_DIR} && cp -r ${APP_DIR} ${BACKUP_DIR}`,
+        waitForCompletion: true,
+      });
+      ui.stepDone('Backup created');
+    }
+
+    // Ensure app dir exists
+    await sandbox.process.exec({
+      command: `mkdir -p ${APP_DIR}`,
+      waitForCompletion: true,
+    });
+
+    // Upload spec and builder
+    const builderSrc = fs.readFileSync(
+      path.resolve(__dirname, '..', '..', 'src', 'builder.mjs'),
+      'utf-8'
+    );
+    await sandbox.fs.writeTree([
+      { path: 'spec.md', content: specContent },
+      { path: 'builder.mjs', content: builderSrc },
+    ], APP_DIR);
+
+    // Write API key to temp file (avoid shell interpolation issues)
+    await sandbox.fs.writeTree([
+      { path: '.ok-api-key', content: process.env.ANTHROPIC_API_KEY },
+    ], '/tmp');
+
+    // Run builder with log streaming
+    ui.bar();
+    ui.step(`${isUpdate ? 'Updating' : 'Building'} ${chalk.bold(specName)} in sandbox`);
+    ui.bar();
+
+    // Start builder async so we can stream logs
+    await sandbox.process.exec({
+      name: BUILD_PROCESS,
+      command: `IS_SANDBOX=1 ANTHROPIC_API_KEY=$(cat /tmp/.ok-api-key) APP_DIR=${APP_DIR} RUNTIME_ENV='${RUNTIME_ENV}' node ${APP_DIR}/builder.mjs`,
+      workingDir: APP_DIR,
+    });
+
+    // Stream logs in background
+    const stream = sandbox.process.streamLogs(BUILD_PROCESS, {
+      onLog: (log: any) => {
+        const text = typeof log === 'string' ? log : log?.message ?? log?.stdout ?? '';
+        if (text) ui.prefixLines(text);
+      },
+    });
+
+    // Wait for build to complete
+    await sandbox.process.wait(BUILD_PROCESS, { maxWait: 600000, interval: 2000 });
+    stream.close();
+
+    // Get final result
+    const buildInfo = await sandbox.process.get(BUILD_PROCESS);
+    const buildExitCode = buildInfo.exitCode;
+
+    // Kill any processes left behind by validation (start.sh, node server.js, etc.)
+    await sandbox.process.exec({
+      command: 'pkill -f "node server" || true; pkill -f "start.sh" || true',
+      waitForCompletion: true,
+    });
+
+    ui.bar();
+
+    // Clean up secrets and builder script
+    await sandbox.process.exec({
+      command: `rm -f /tmp/.ok-api-key ${APP_DIR}/builder.mjs ${APP_DIR}/.prompt.txt`,
+      waitForCompletion: true,
+    });
+
+    if (buildExitCode !== 0) {
+      ui.error('Build failed in sandbox');
+
+      if (isUpdate) {
+        ui.info('Rolling back...');
+        await sandbox.process.exec({
+          command: `rm -rf ${APP_DIR} && mv ${BACKUP_DIR} ${APP_DIR}`,
+          waitForCompletion: true,
+        });
+      } else {
+        await sandbox.process.exec({
+          command: `rm -rf ${APP_DIR}`,
+          waitForCompletion: true,
+        });
+      }
+      process.exit(1);
+    }
+
+    // Success — clean up backup
+    if (isUpdate) {
+      await sandbox.process.exec({
+        command: `rm -rf ${BACKUP_DIR}`,
+        waitForCompletion: true,
+      });
+    }
+
+    ui.outro(`${chalk.green('Done!')} Built ${chalk.bold(specName)} in sandbox`);
   }
 
   async run(specName: string, opts: RunOpts): Promise<void> {
     const sandbox = await this.getSandbox(specName);
 
     if (!sandbox) {
-      console.error(chalk.red(`No sandbox found for ${specName}. Run \`ok build\` first.`));
+      ui.error(`No sandbox found for ${specName}. Run \`ok build\` first.`);
       process.exit(1);
     }
 
@@ -164,7 +217,7 @@ export class BlaxelRuntime implements Runtime {
           metadata: { name: PREVIEW_NAME },
           spec: { port: parseInt(port, 10), public: true },
         });
-        console.log(chalk.cyan(`${specName} already running on ${preview.spec?.url}`));
+        ui.success(`${specName} already running on ${preview.spec?.url}`);
         return;
       }
     } catch { /* process doesn't exist yet */ }
@@ -189,7 +242,7 @@ export class BlaxelRuntime implements Runtime {
 
     // Start app
     const envExports = Object.entries(env).map(([k, v]) => `export ${k}='${v.replace(/'/g, "'\\''")}'`).join(' && ');
-    console.log(chalk.dim('Starting app...'));
+    ui.step('Starting app...');
 
     await sandbox.process.exec({
       name: APP_PROCESS,
@@ -204,8 +257,7 @@ export class BlaxelRuntime implements Runtime {
       try {
         const proc = await sandbox.process.get(APP_PROCESS);
         if (proc.status !== 'running') {
-          console.error(chalk.red(`App failed to start (status: ${proc.status}, exit: ${proc.exitCode})`));
-          // Try to get logs
+          ui.error(`App failed to start (status: ${proc.status}, exit: ${proc.exitCode})`);
           try {
             if (proc.logs?.stderr) console.error(proc.logs.stderr);
             else if (proc.logs?.stdout) console.error(proc.logs.stdout);
@@ -222,13 +274,13 @@ export class BlaxelRuntime implements Runtime {
           spec: { port: portNum, public: true },
         });
         if (preview.spec?.url) {
-          console.log(chalk.cyan(`Running ${specName} on ${preview.spec.url}`));
+          ui.outro(`Running ${chalk.bold(specName)} on ${chalk.cyan(preview.spec.url)}`);
           return;
         }
       } catch { /* port not ready yet */ }
     }
 
-    console.error(chalk.red('Timed out waiting for app to start'));
+    ui.error('Timed out waiting for app to start');
     process.exit(1);
   }
 
@@ -236,16 +288,16 @@ export class BlaxelRuntime implements Runtime {
     const sandbox = await this.getSandbox(specName);
 
     if (!sandbox) {
-      console.log(chalk.dim(`No sandbox found for ${specName}`));
+      ui.info(`No sandbox found for ${specName}`);
       return;
     }
 
     try {
-      console.log(chalk.dim(`Stopping app...`));
+      ui.step('Stopping app...');
       await sandbox.process.kill(APP_PROCESS);
-      console.log(chalk.green(`Stopped ${specName}`));
+      ui.success(`Stopped ${specName}`);
     } catch {
-      console.log(chalk.dim(`${specName} is not running`));
+      ui.info(`${specName} is not running`);
     }
   }
 
@@ -254,28 +306,11 @@ export class BlaxelRuntime implements Runtime {
     const name = `ok-${specName}`;
 
     try {
-      console.log(chalk.dim(`Deleting sandbox ${name}...`));
+      ui.step(`Deleting sandbox ${chalk.bold(name)}`);
       await SandboxInstance.delete(name);
-      console.log(chalk.green(`Deleted sandbox for ${specName}`));
+      ui.success(`Deleted sandbox for ${specName}`);
     } catch {
-      console.log(chalk.dim(`No sandbox found for ${specName}`));
+      ui.info(`No sandbox found for ${specName}`);
     }
-
-    // Also clean up the Docker image
-    await this.docker.destroy(specName);
-  }
-
-  private listFiles(dir: string, prefix = ''): string[] {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    let files: string[] = [];
-    for (const e of entries) {
-      const rel = prefix ? `${prefix}/${e.name}` : e.name;
-      if (e.isDirectory()) {
-        files = files.concat(this.listFiles(path.join(dir, e.name), rel));
-      } else if (e.isFile()) {
-        files.push(rel);
-      }
-    }
-    return files;
   }
 }

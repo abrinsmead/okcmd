@@ -1,80 +1,84 @@
-import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, openSync, unlinkSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 
-const spec = readFileSync('/app/spec.md', 'utf-8');
+const appDir = process.env.APP_DIR || '/app';
+const runtimeEnv = process.env.RUNTIME_ENV || 'node:lts-alpine — Node.js is available, anything else must be installed via apk/npm';
 
-const requirements = `Requirements:
-- Entrypoint must be /app/start.sh (a shell script that starts the app)
-- Single HTTP server on the port from PORT env var (only one port is exposed)
-- The runtime image is node:lts-alpine — Node.js is available, anything else must be installed via apk/npm
-- Do NOT use npm packages that require native compilation (no node-gyp, no Python). For SQLite use sql.js (pure JS/WASM), not better-sqlite3
-- Build a simple MVP — minimal architecture, no over-engineering
-- For web apps with a frontend: use Vite (npm create vite@latest my-app -- --template react)
-  - Build the frontend to static files, serve them from the backend
-- For the backend: a single Express server is fine (or just serve static files if no API needed)
-- Use ESM imports (import/export), not CommonJS require(). If package.json has "type": "module", all .js files must use ESM
-- Do NOT use Next.js, Remix, or heavy frameworks
-- Keep it simple: flat file structure, minimal dependencies, no unnecessary abstractions`;
+const spec = readFileSync(join(appDir, 'spec.md'), 'utf-8');
+
+const requirements = `Rules:
+- All files go under ${appDir}/
+- Entrypoint: ${appDir}/start.sh — a shell script that installs deps, builds if needed, and starts the server
+- Single HTTP server listening on the port from the PORT env var
+- The runtime is ${runtimeEnv}
+- Use ESM ("type": "module" in package.json, import/export everywhere)
+- No native compilation packages (no node-gyp, no Python). Use sql.js not better-sqlite3
+- No heavy frameworks (no Next.js, Remix, Nuxt)
+
+Architecture (follow this exactly):
+- Frontend: write React/JSX files by hand under src/. Create a vite.config.js. Do NOT use \`npx create-vite\` or any scaffolding tool
+- Build frontend: \`npx vite build\` (outputs to dist/)
+- Backend: single Express server (server.js) that serves dist/ as static files and handles API routes
+- start.sh pattern:
+  cd ${appDir}
+  npm install --omit=dev
+  npx vite build
+  node server.js
+
+Validation (do this after writing all files):
+1. Run: PORT=3000 sh ${appDir}/start.sh
+2. Wait a few seconds, then: curl -s http://localhost:3000
+3. If curl succeeds, kill the server process and you're done
+4. If it fails, read the error output, fix, and retry (max 3 attempts)
+5. Always kill the server before finishing — do NOT leave processes running
+
+Style: Be terse. No planning. No TodoWrite. Write files, then validate.`;
 
 // Check if there's an existing app to update
-const isUpdate = existsSync('/app/start.sh');
+const isUpdate = existsSync(join(appDir, 'start.sh'));
 let prompt;
 
 if (isUpdate) {
-  // Read existing app files (skip spec.md and builder.mjs)
-  const skip = new Set(['spec.md', 'builder.mjs']);
-  const appFiles = listFiles('/app').filter(f => !skip.has(f));
-  let filesContext = '';
-  for (const f of appFiles) {
-    const content = readFileSync(join('/app', f), 'utf-8');
-    filesContext += `<file path="/app/${f}">\n${content}\n</file>\n\n`;
-  }
+  const skip = new Set(['spec.md', 'builder.mjs', '.prompt.txt']);
+  const appFiles = listFiles(appDir).filter(f => !skip.has(f));
 
-  prompt = `The spec for this app has changed.
+  prompt = `The spec for this app has changed. Update it to match.
 
 <new-spec>
 ${spec}
 </new-spec>
 
-Here are the current app files:
+The existing app is in ${appDir}/ with these files:
+${appFiles.join('\n')}
 
-${filesContext}
-Update the app to match the new spec. Only modify what's necessary.
+Read the files you need, then make only the changes required by the new spec.
 
-${requirements}
-
-After updating, validate: PORT=3000 sh /app/start.sh
-If errors, fix and retry (up to 3 attempts).
-Once it starts successfully, stop the process.
-
-Output style: Be terse.`;
+${requirements}`;
 
   console.log(`Updating existing app (${appFiles.length} files)...`);
 } else {
-  prompt = `<spec>
+  prompt = `Build a web app matching this spec.
+
+<spec>
 ${spec}
 </spec>
 
-Build a web app matching this spec. All files go under /app/.
-
-${requirements}
-
-After writing, validate: PORT=3000 sh /app/start.sh
-If errors, fix and retry (up to 3 attempts).
-Once it starts successfully, stop the process.
-
-Output style: Be terse.`;
+${requirements}`;
 }
 
+// Write prompt to file and pipe via stdin to avoid E2BIG on large prompts
+const promptFile = join(appDir, '.prompt.txt');
+writeFileSync(promptFile, prompt);
+
 const proc = spawn('claude', [
-  '-p', prompt,
+  '-p',
   '--allowedTools', 'Write,Edit,Read,Bash',
   '--dangerously-skip-permissions',
   '--output-format', 'stream-json',
   '--verbose',
-], { stdio: ['ignore', 'pipe', 'inherit'] });
+], { stdio: [openSync(promptFile, 'r'), 'pipe', 'inherit'] });
 
 const rl = createInterface({ input: proc.stdout });
 
@@ -126,6 +130,7 @@ for await (const line of rl) {
 }
 
 const code = await new Promise(resolve => proc.on('close', resolve));
+try { unlinkSync(promptFile); } catch { /* ignore */ }
 if (code !== 0) {
   console.error(`claude exited with code ${code}`);
   process.exit(1);
@@ -133,7 +138,7 @@ if (code !== 0) {
 
 // Verify start.sh was created
 try {
-  statSync('/app/start.sh');
+  statSync(join(appDir, 'start.sh'));
 } catch {
   console.error('builder: start.sh was not generated');
   process.exit(1);

@@ -1,4 +1,4 @@
-import chalk from 'chalk';
+import * as ui from './ui';
 import { deriveSpecName } from './build';
 import { createRuntime, RuntimeName, RunOpts } from './runtime';
 
@@ -8,7 +8,7 @@ interface RunCommandOpts extends RunOpts {
 
 export async function run(filename: string, opts: RunCommandOpts): Promise<void> {
   if (!filename) {
-    console.error(chalk.red('Usage: ok run <spec.md>'));
+    ui.error('Usage: ok run <spec.md>');
     process.exit(1);
   }
 
